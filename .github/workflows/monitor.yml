@@ -1,0 +1,46 @@
+name: Monitor
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+permissions:
+  actions: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check site
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          URL=https://naydi-sebe-pitomca.online/healthz
+          send() { curl -s -m 15 "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$1" >/dev/null; }
+          # две попытки с паузой, чтобы не тревожить из-за случайного сбоя
+          for i in 1 2; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 30 "$URL"); RC=$?
+            [ "$CODE" = 200 ] && break
+            sleep 30
+          done
+          PREV=$(gh run list -R "$GITHUB_REPOSITORY" --workflow monitor.yml --limit 2 --json conclusion -q '.[1].conclusion' 2>/dev/null)
+          if [ "$CODE" = 200 ]; then
+            [ "$PREV" = failure ] && send "✅ Сайт снова доступен (внешняя проверка)."
+            exit 0
+          fi
+          case "$RC" in
+            6)  WHY="Домен не находится (DNS). Возможно, не продлён домен или сломаны DNS-записи. Что делать: проверить оплату домена у регистратора.";;
+            7)  WHY="Сервер отказывает в соединении: он включён, но не работает nginx. Что делать: зайти по ssh и выполнить systemctl restart nginx";;
+            28) WHY="Сервер не отвечает: выключен, завис или у хостинга проблемы с сетью. Что делать: попробовать зайти по ssh; если не получается — перезагрузить сервер в панели хостинга или написать в поддержку.";;
+            35|51|58|60) WHY="Ошибка сертификата https (истёк или сломан). Что делать: на сервере выполнить certbot renew && systemctl reload nginx";;
+            *) case "$CODE" in
+                 502) WHY="nginx работает, но приложение сайта остановлено или перезапускается. Что делать: подождать 3 минуты (загружается нейросеть); если не прошло — systemctl restart pushistyi";;
+                 503|504) WHY="Приложение не успевает ответить — сильно перегружено. Обычно проходит само; подробности — в сообщении бота с сервера.";;
+                 404) WHY="Пропал служебный адрес /healthz — изменился конфиг nginx.";;
+                 *) WHY="Сервер ответил кодом $CODE (ошибка соединения $RC).";;
+               esac;;
+          esac
+          [ "$PREV" != failure ] && send "🚨 Внешняя проверка: сайт недоступен (код $CODE)."$'\n\n'"Почему: $WHY"
+          exit 1
